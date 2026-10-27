@@ -4,7 +4,6 @@ import threading
 import requests
 from flask import Flask
 from web3 import Web3
-from web3.middleware import ExtraDataToPOAMiddleware
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -32,8 +31,6 @@ if not POLYGON_RPC_URL or not PRIVATE_KEY or not BOT_CONTRACT_ADDRESS:
     exit()
 
 w3 = Web3(Web3.HTTPProvider(POLYGON_RPC_URL))
-w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
-
 if not w3.is_connected():
     print("[-] Error: Failed to connect to Polygon Mainnet RPC.")
     exit()
