@@ -2,11 +2,24 @@ import os
 import time
 import threading
 import requests
+from flask import Flask
 from web3 import Web3
 from web3.middleware import ExtraDataToPOAMiddleware
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# إعداد خادم الويب الوهمي لإبقاء الخدمة مستيقظة على Render
+app = Flask(__name__)
+
+@app.route("/")
+def home():
+    return "🤖 Polygon Liquidation Bot is Running 24/7!"
+
+def run_web_server():
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
+
 
 POLYGON_RPC_URL = os.getenv("POLYGON_RPC_URL")
 PRIVATE_KEY = os.getenv("PRIVATE_KEY")
@@ -15,7 +28,7 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 if not POLYGON_RPC_URL or not PRIVATE_KEY or not BOT_CONTRACT_ADDRESS:
-    print("[-] Error: Missing required environment variables in .env file.")
+    print("[-] Error: Missing required environment variables.")
     exit()
 
 w3 = Web3(Web3.HTTPProvider(POLYGON_RPC_URL))
@@ -25,13 +38,12 @@ if not w3.is_connected():
     print("[-] Error: Failed to connect to Polygon Mainnet RPC.")
     exit()
 
-print("[+] Successfully connected to Polygon Mainnet via Alchemy.")
+print("[+] Successfully connected to Polygon Mainnet.")
 
 account = w3.eth.account.from_key(PRIVATE_KEY)
 bot_address = account.address
 print(f"[+] Bot Wallet Address Loaded: {bot_address}")
 
-# عناوين بركات الإقراض المدعومة
 PROTOCOLS = {
     "Aave_v3": "0x794a61358D6845594F94dc1DB02A252b5b4814aD",
     "Radiant_v2": "0x265E9Dcf7C286eA35541e3E4F4256A5B20235334"
@@ -73,22 +85,16 @@ BOT_ABI = [
 
 bot_contract = w3.eth.contract(address=w3.to_checksum_address(BOT_CONTRACT_ADDRESS), abi=BOT_ABI)
 
-# قوائم المقترضين المبدئية لكل بروتوكول
 tracked_borrowers = {
     "Aave_v3": {"0x8539f40398f6d507dd43dff63f533a1e3ff2bf83"},
     "Radiant_v2": set()
 }
 
 def send_telegram_alert(message):
-    """إرسال إشعار لحظي إلى بوت التلغرام"""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": message,
-        "parse_mode": "Markdown"
-    }
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}
     try:
         requests.post(url, json=payload, timeout=5)
     except Exception as e:
@@ -121,28 +127,15 @@ def execute_onchain_liquidation(proto_name, pool_address, borrower):
         signed_tx = w3.eth.account.sign_transaction(tx, private_key=PRIVATE_KEY)
         tx_hash = w3.eth.send_raw_transaction(signed_tx.rawTransaction)
         tx_hash_hex = w3.to_hex(tx_hash)
-        print(f"[+] Multi-protocol tx sent! Hash: {tx_hash_hex}")
         
         receipt = w3.eth.wait_for_transaction_receipt(tx_hash)
         if receipt['status'] == 1:
-            success_msg = (
-                f"✅ *Liquidation Executed Successfully!*\n"
-                f"🌐 Protocol: `{proto_name}`\n"
-                f"👤 Borrower: `{borrower}`\n"
-                f"💰 Covered Debt: `100 USDC`\n"
-                f"🔗 Tx Hash: `{tx_hash_hex}`"
-            )
-            print("[✅] Liquidation executed successfully!")
+            success_msg = f"✅ *Liquidation Executed!*\n🌐 Protocol: `{proto_name}`\n👤 Borrower: `{borrower}`\n🔗 Tx: `{tx_hash_hex}`"
             send_telegram_alert(success_msg)
         else:
-            fail_msg = f"❌ *Liquidation Reverted on Chain!*\n🌐 Protocol: `{proto_name}`\n👤 Borrower: `{borrower}`"
-            print("[-] Transaction reverted on-chain.")
-            send_telegram_alert(fail_msg)
-            
+            send_telegram_alert(f"❌ *Liquidation Reverted!*\n🌐 Protocol: `{proto_name}`")
     except Exception as e:
-        error_msg = f"⚠️ *Liquidation Error!*\n🌐 Protocol: `{proto_name}`\n❌ Error: `{str(e)}`"
-        print(f"[-] Error executing liquidation: {e}")
-        send_telegram_alert(error_msg)
+        send_telegram_alert(f"⚠️ *Liquidation Error!*\n🌐 Protocol: `{proto_name}`\n❌ Error: `{str(e)}`")
 
 def scan_liquidations():
     while True:
@@ -150,27 +143,24 @@ def scan_liquidations():
             borrowers = tracked_borrowers.get(proto_name, set())
             if not borrowers:
                 continue
-                
             pool_contract = w3.eth.contract(address=w3.to_checksum_address(pool_addr), abi=POOL_ABI)
-            print(f"\n[*] Scanning {len(borrowers)} borrowers on [{proto_name}]...")
-            
             for borrower in list(borrowers):
                 try:
                     data = pool_contract.functions.getUserAccountData(borrower).call()
                     health_factor = data[5]
-                    
                     if 0 < health_factor < 10**18:
-                        hf_formatted = w3.from_wei(health_factor, 'ether')
-                        print(f"[🚨] ALERT on {proto_name}! Liquidatable account: {borrower} | HF: {hf_formatted}")
                         execute_onchain_liquidation(proto_name, pool_addr, borrower)
-                    else:
-                        hf_formatted = w3.from_wei(health_factor, 'ether') if health_factor > 0 else 0
-                        print(f"[-] [{proto_name}] User {borrower[:6]}... is safe (HF: {hf_formatted})")
                 except Exception:
                     pass
         time.sleep(15)
 
 if __name__ == "__main__":
-    print("[*] Multi-Protocol Liquidation Scanner with Telegram Alerts Started...")
-    send_telegram_alert("🤖 *Liquidation Bot Started Successfully!* Ready to scan Aave & Radiant.")
-    scan_liquidations()
+    print("[*] Starting Web Server & Liquidation Scanner Thread...")
+    send_telegram_alert("🤖 *Liquidation Bot (Web Service) Started!* Ready on Render.")
+    
+    # تشغيل الماسح في خلفية مستقلة (Background Thread)
+    scanner_thread = threading.Thread(target=scan_liquidations, daemon=True)
+    scanner_thread.start()
+    
+    # تشغيل خادم الويب الأساسي للامتثال لشروط Render المجانية
+    run_web_server()
